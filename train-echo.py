@@ -18,7 +18,7 @@ import torch.nn.functional as F
 import argparse
 parser = argparse.ArgumentParser(description='')
 parser.add_argument('-n', '--name', required=True)
-parser.add_argument('-m', '--model', required=True)
+parser.add_argument('-m', '--modelname', required=True)
 
 parser.add_argument('-t', '--trainfilepath', required=False, default="/ml/text/emojis.txt", type=str)
 parser.add_argument('-v', '--testfilepath', required=False, default="/ml/text/emojis_test.txt", type=str)
@@ -37,18 +37,11 @@ parser.add_argument('-s', '--save', action='store_true')
 parser.add_argument('-a', '--attn', required=False, default=0, type=int)
 parser.add_argument('-ah', '--attnheads', required=False, default=4, type=int)
 parser.add_argument('-b', '--batchsize', required=False, default=32, type=int)
+parser.add_argument('-llama', '--llamapath', default="/ml/ais", type=str)
 parser.add_argument('-forwardforward', '--forwardforward', action='store_true')
 args = parser.parse_args()
 
-#size = "llama-7b"
-#size = "6.9b"
-#size = "1.4b"
-#size = "410m"
-#size = "160m"
-#size = "Cerebras-GPT-2.7B"
-size = args.model#"Cerebras-GPT-6.7B"
-#size = "Cerebras-GPT-590M"
-#size = "Cerebras-GPT-111M"
+model_name = args.modelname
 use_cot = args.usecot
 use_forward_forward = args.forwardforward
 use_cerebras = False
@@ -71,43 +64,32 @@ seq_length = args.seqlength
 batch_size = args.batchsize
 num_workers = 8  # Adjust this based on your system's resources
 
-if "llama" in size:
+if "llama" in model_name:
     from transformers import LlamaConfig, LlamaForCausalLM
     from transformers.models.llama.tokenization_llama import LlamaTokenizer
-    from repos.gptq.llama import load_quant
-    from repos.gptq.gptq import *
-    from repos.gptq.modelutils import *
-    from repos.gptq.quant import *
 
-    quantized_path = "/ml/ais/llama/7b/4bit.pt"
-    llama_path = "/ml/ais/llama/7b/llama-7b/"
+    llama_path = args.llamapath
     config = LlamaConfig.from_pretrained(llama_path, load_in_8_bit=True, device_map='auto')
     gpt2 = LlamaForCausalLM(config)
-    #gpt2 = load_quant(llama_path, quantized_path, 4)
     tokenizer = LlamaTokenizer.from_pretrained(llama_path)
     use_llama = True
     vocab_size = tokenizer.vocab_size
-elif "Cerebras" in size:
-    tokenizer = AutoTokenizer.from_pretrained("cerebras/"+size)
-    gpt2 = AutoModelForCausalLM.from_pretrained("cerebras/"+size)
-    vocab_size = tokenizer.vocab_size
-    use_cerebras = True
-else:
-    gpt2 = GPTNeoXForCausalLM.from_pretrained(
-      f"EleutherAI/pythia-{size}-deduped"
-    )
-    tokenizer = AutoTokenizer.from_pretrained(
-      f"EleutherAI/pythia-{size}-deduped"
-    )
+elif "pythia" in model_name:
+    gpt2 = GPTNeoXForCausalLM.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     vocab_size = 50274
+else:
+    gpt2 = AutoModelForCausalLM.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    vocab_size = tokenizer.vocab_size
 
 gpt2.eval()
 gpt2.cuda()
 
-
 if use_llama:
     gpt2_embedding_layer = gpt2.base_model.embed_tokens
-elif use_cerebras:
+elif use_cerebras and hasattr(gpt2.base_model, 'wte'):
+    use_cerebras = True
     gpt2_embedding_layer = gpt2.base_model.wte
 else:
     gpt2_embedding_layer =  gpt2.base_model.embed_in
@@ -174,12 +156,6 @@ class LargeTextDataset(Dataset):
 
         return input_sequence, target_sequence
 
-
-import torch.nn as nn
-
-
-import torch.nn as nn
-
 class FilterModel(nn.Module):
     def __init__(self, input_size, hidden_size, dropout_rate=0.5):
         super(FilterModel, self).__init__()
@@ -244,7 +220,7 @@ class MultiHeadAttention(nn.Module):
         return attention_output
 
 class CustomReservoir(nn.Module):
-    def __init__(self, input_size, reservoir_size, connectivity=0.2, spectral_radius=0.9, leak_rate=0.8, num_heads=1, num_attention_layers=1):
+    def __init__(self, input_size, reservoir_size, connectivity=0.2, spectral_radius=0.9, leak_rate=0.8, num_heads=1, num_attention_layers=0):
         super(CustomReservoir, self).__init__()
         self.reservoir_size = reservoir_size
         self.connectivity = connectivity
@@ -259,7 +235,6 @@ class CustomReservoir(nn.Module):
         self.feed_forwards = nn.ModuleList([PositionWiseFeedForward(reservoir_size, ff_hidden_size) for _ in range(num_attention_layers)])
 
         self.layer_norms = nn.ModuleList([nn.LayerNorm(reservoir_size) for _ in range(num_attention_layers)])
-        #self.layer_norm = nn.LayerNorm(reservoir_size)
 
         self.init_weights()
 
@@ -271,31 +246,12 @@ class CustomReservoir(nn.Module):
         r = torch.matmul(prev_state, self.wres)
 
         attention_output = r
-        #for multi_head_attention, feed_forward, layer_norm1, layer_norm2 in zip(self.multi_head_attentions, self.feed_forwards, self.layer_norms1, self.layer_norms2):
-            # Multi-head attention with residual connection
-            #temp = multi_head_attention(prev_state, attention_output)
-            #attention_output = layer_norm1(attention_output + temp)
-
-            # Feed-forward layer with residual connection
-            #temp = feed_forward(attention_output)
         for multi_head_attention, layer_norm in zip(self.multi_head_attentions, self.layer_norms):
             mha = multi_head_attention(prev_state, layer_norm(attention_output))
             attention_output = attention_output + mha
 
-
-            #attention_output = layer_norm2(attention_output + temp)
-
         next_state = (1 - self.leak_rate) * prev_state + self.leak_rate * self.activation(u + attention_output)
-        #next_state = self.layer_norm(next_state)
-        #next_state = self.activation(next_state)
         return next_state
-
-
-    def init_sparse_weights(self, size, connectivity):
-        indices = torch.nonzero(torch.rand(size, size) < connectivity)
-        values = torch.randn(indices.shape[0])
-        sparse_tensor = torch.sparse.FloatTensor(indices.t(), values, (size, size))
-        return sparse_tensor
 
     def init_sparse_weights(self, size, connectivity):
         indices = torch.nonzero(torch.rand(size, size) < connectivity)
@@ -401,12 +357,6 @@ class ReservoirComputing(nn.Module):
         self.readout = nn.Linear(reservoir_size, output_size)
         self.memory_size=64
         self.memory_vector_length=reservoir_size
-        num_read_heads = 1
-        num_write_heads = 1
-        #self.memory = nn.Parameter(torch.randn(self.memory_size, self.memory_vector_length) * 0.01, requires_grad=False).cuda()
-
-        #self.read_attention = ReadAttention(reservoir_size, self.memory_size, self.memory_vector_length, num_read_heads).cuda()
-        #self.write_attention = WriteAttention(reservoir_size, self.memory_size, self.memory_vector_length).cuda()
 
         self.hidden = [None] * num_layers
 
@@ -431,7 +381,6 @@ class ReservoirComputing(nn.Module):
 
         x = x / torch.norm(x, dim=1, keepdim=True)
 
-        #print('x', x.min(), x.mean(), x.max())
         for t in range(seq_length):
             layer_input = x[:, t, :]
             for i, reservoir in enumerate(self.reservoir_layers):
@@ -439,13 +388,6 @@ class ReservoirComputing(nn.Module):
                     self.hidden[i] = torch.zeros(batch_size, reservoir.reservoir_size, device=x.device)
                     self.memory = torch.randn(batch_size, self.memory_size, self.memory_vector_length, device=x.device) * 0.01
                 self.hidden[i] = reservoir(layer_input, self.hidden[i])
-                #read_weights = self.read_attention(self.hidden[i], self.memory)
-                #write_weights, erase_vector, add_vector = self.write_attention(self.hidden[i], self.memory)
-                #self.memory = (self.memory * (1 - torch.matmul(write_weights.unsqueeze(-1), erase_vector.unsqueeze(1)))) + torch.matmul(write_weights.unsqueeze(-1), add_vector.unsqueeze(1))
-                #read_vector = torch.matmul(read_weights, self.memory)
-
-                #self.hidden[i] = torch.cat([self.hidden[i], read_vector.view(self.hidden[i].shape[0], -1)], dim=-1)
-                #self.hidden[i] = self.hidden[i] + read_vector.mean(dim=1)
                 layer_input = self.hidden[i]
 
 
@@ -612,35 +554,6 @@ def train_mediator(mediator, generator, target, x, med_optimizer):
     med_optimizer.step()
     return med_loss
 
-def apply_filter_model(batch_data, filter_model, threshold_range):
-    # Pass the batch of data through the filter_model to get the scores
-    scores = filter_model(batch_data)  # [batch_size, seq_len]
-    #scores = torch.rand([batch_data.shape[0]], device=batch_data.device)
-
-    # Compare the scores with the threshold range
-    mask = (scores < threshold_range[0]) | (scores > threshold_range[1])  # [batch_size, seq_len]
-
-    # Match the dimensions of the mask with the batch data
-    mask = mask.unsqueeze(-1)
-    print(scores.mean().item(), mask.float().mean().item())
-
-    # Select a random incorrect token for each entry in the batch
-    #vocab_len = batch_data.size(-1)
-    #targets = torch.argmax(batch_data, dim=-1)  # [batch_size, seq_len]
-    #incorrect_targets = torch.randint(0, vocab_len - 1, targets.size(), device=batch_data.device)  # [batch_size, seq_len]
-    #incorrect_targets[targets == incorrect_targets] = vocab_len - 1
-
-    # One-hot encode the incorrect targets
-    #incorrect_one_hot = F.one_hot(incorrect_targets, num_classes=vocab_len).float()
-
-    # Modify the elements in the batch based on the comparison
-    modified_batch_data = torch.where(mask, torch.softmax(torch.rand_like(batch_data), -1), batch_data)
-    #modified_batch_data = batch_data
-
-    return modified_batch_data
-
-import torch
-
 def replace_random_token(tensor):
     batch_size, seq_len, vocab_size = tensor.size()
     
@@ -663,18 +576,15 @@ def replace_random_token(tensor):
     return tensor
 
 
-def train_forward_forward(model, x_pos, x_neg, target, filter_model):
-    # Get the probabilities using softmax
-    #g_pos = F.softmax(model.forward(x), dim=-1)  # [batch_size, seq_len, vocab_len]
+def train_forward_forward(model, x_pos, x_neg, target):
     g_pos = model.forward(x_pos)
     vocab_len = g_pos.size(-1)
-    #if random.choice([True, False]):
-    #g_neg = model.forward(x_neg)
-    #else:
-    #noise = torch.rand_like(x_pos)*4-2
-    g_neg = model.forward((x_pos + noise)/ 2)
-    g_neg = torch.randint(0, vocab_len - 1, target.size(), device=x_pos.device)  # [batch_size, seq_len]
-    g_neg = F.one_hot(g_neg, num_classes=vocab_len).float()
+    if x_neg is None:
+        g_neg = torch.randint(0, vocab_len - 1, target.size(), device=x_pos.device)  # [batch_size, seq_len]
+        g_neg = F.one_hot(g_neg, num_classes=vocab_len).float()
+        #g_neg = model.forward(rand_pos)
+    else:
+        g_neg = model.forward(x_neg)
     indices = torch.randint(x_pos.shape[1], size=(target.shape[0], 1, 1))
     alpha = torch.rand([1], device=x_pos.device)
 
@@ -685,19 +595,8 @@ def train_forward_forward(model, x_pos, x_neg, target, filter_model):
 
     # Get the probability of the correct next token for positive samples
     g_pos_correct = torch.gather(g_pos, -1, target.unsqueeze(-1)).squeeze(-1)  # [batch_size, seq_len]
-    #g_neg_incorrect = torch.gather(g_neg*filter_mask, -1, target.unsqueeze(-1)).squeeze(-1)  # [batch_size, seq_len]
     g_neg_incorrect = torch.gather(g_neg, -1, target.unsqueeze(-1)).squeeze(-1)  # [batch_size, seq_len]
 
-    # Select a random incorrect token for each entry in the batch
-    #incorrect_target = torch.randint(0, vocab_len - 1, target.size(), device=x.device)  # [batch_size, seq_len]
-    #incorrect_target[target == incorrect_target] = vocab_len - 1
-
-    # Get the probability of the incorrect next token for negative samples
-    #g_neg_incorrect = torch.gather(g_pos, -1, incorrect_target.unsqueeze(-1)).squeeze(-1)  # [batch_size, seq_len]
-
-    # Compute the negative log-likelihood
-    #nll_pos = -torch.log(g_pos_correct + 1e-8)  # [batch_size, seq_len]
-    #nll_neg = -torch.log(g_neg_incorrect + 1e-8)  # [batch_size, seq_len]
     nll_pos = g_pos_correct
     nll_neg = g_neg_incorrect
 
@@ -707,17 +606,7 @@ def train_forward_forward(model, x_pos, x_neg, target, filter_model):
     loss = torch.log(1 + torch.exp(torch.cat([
         -nll_pos + threshold,
         nll_neg - threshold]))).mean()
-    #filter_pos_predictions = filter_model(x_pos.detach())  # [batch_size, seq_len]
-    #filter_neg_predictions = filter_model(x_neg.detach())  # [batch_size, seq_len]
-
-    #loss = (nll_pos - nll_neg).mean()
-    #filter_loss_pos = F.binary_cross_entropy_with_logits(filter_pos_predictions, g_pos_correct.detach())
-    #filter_loss_neg = F.binary_cross_entropy_with_logits(filter_neg_predictions, (1 - g_neg_incorrect.detach()))
-
-    #filter_loss = (filter_loss_pos + filter_loss_neg) / 2
-    filter_loss = 0
-
-    return loss, filter_loss
+    return loss
 
 def minimal_negative_filtering(probs, top_k, prob_threshold, entropy_threshold, targets):
     batch_size, seq_len, vocab_len = probs.size()
@@ -753,7 +642,7 @@ def minimal_negative_filtering(probs, top_k, prob_threshold, entropy_threshold, 
     return filter_mask
 
 
-def train_model(model, gpt2, tokenizer, neg_data_loader, train_data_loader, val_data_loader, epochs, seq_length, lr=6e-3, weight_decay=1e-2, early_stop_patience=4, med = None, save_every_epoch=False, filter_model=None):
+def train_model(model, gpt2, tokenizer, neg_data_loader, train_data_loader, val_data_loader, epochs, seq_length, lr=6e-3, weight_decay=1e-2, early_stop_patience=4, med = None, save_every_epoch=False):
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.readout.parameters(), lr=lr, betas=(0.9, 0.99))
     #optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay, betas=(0.9,0.999))
@@ -803,20 +692,19 @@ def train_model(model, gpt2, tokenizer, neg_data_loader, train_data_loader, val_
                 #llm_gen = tokens_2d.view(probabilities.size(0), probabilities.size(1))
                 #
                 #x_neg, _ = extract_features(llm_gen, gpt2)
-                try:
-                    neg_batch = next(neg_data)[0]
-                except StopIteration:
-                    neg_data = iter(data_loader)
-                    neg_batch = next(neg_data)[0]
+                if neg_data_loader:
+                    try:
+                        neg_batch = next(neg_data)[0]
+                    except StopIteration:
+                        neg_data = iter(data_loader)
+                        neg_batch = next(neg_data)[0]
+                    x_neg, _ = extract_features(neg_batch, gpt2)
+                else:
+                    x_neg = None
 
-                x_neg, _ = extract_features(neg_batch, gpt2)
-                #x_neg2 = apply_filter_model(x_neg, filter_model, (0.3, 0.7))
-                #x_neg = None
-                loss, filter_loss = train_forward_forward(model, x, x_neg, target, filter_model)
+                loss = train_forward_forward(model, x, x_neg, target)
                 loss.backward()
                 optimizer.step()
-                #filter_loss.backward()
-                #filter_optimizer.step()
                 train_loss += loss.item()
             else:
 
@@ -958,8 +846,6 @@ def load_models(args):
     model = ReservoirComputing(input_size, reservoir_size, vocab_size, num_attention_layers=args.attn, num_layers=args.layers, spectral_radius=args.spectralradius, leak_rate=args.leakrate, connectivity=args.connectivity, num_heads=args.attnheads).cuda()
     med = ReservoirComputing(input_size, reservoir_size, vocab_size, num_attention_layers=args.attn, num_layers=args.layers, spectral_radius=args.spectralradius, leak_rate=args.leakrate, connectivity=args.connectivity, num_heads=args.attnheads).cuda()
     num_filters = 128
-    #filter_model = FilterModel(input_size, num_filters)
-    filter_model = None
     loaded = False
     if os.path.exists(model_path):
         print("Model exists, loading")
@@ -968,7 +854,9 @@ def load_models(args):
         if use_cot and os.path.exists(med_model_path):
             print("Mediator model exists, loading")
             med.load_state_dict(torch.load(med_model_path))
-    return model, med, filter_model, loaded
+    else:
+        print("No model exists, new model created.")
+    return model, med, loaded
 
 
 if __name__ == "__main__":
@@ -983,8 +871,7 @@ if __name__ == "__main__":
         neg_data_loader = None
     prompt = """emoji pizza="""
 
-    print("Loading models")
-    model, med, filter_model, loaded = load_models(args)
+    model, med, loaded = load_models(args)
     model.reset()
     if torch.cuda.device_count() > 1:
         print("Using", torch.cuda.device_count(), "GPUs!")
@@ -995,8 +882,8 @@ if __name__ == "__main__":
 
     if not loaded or args.train:
         size = torch.cuda.device_count()
-        print("New model, training")
-        train_model(model, gpt2, tokenizer, neg_data_loader, data_loader, test_data_loader, epochs, seq_length, med=med, save_every_epoch=args.save, filter_model=filter_model, lr=args.learnrate)
+        print("Training")
+        train_model(model, gpt2, tokenizer, neg_data_loader, data_loader, test_data_loader, epochs, seq_length, med=med, save_every_epoch=args.save, lr=args.learnrate)
         torch.save(model.state_dict(), model_path)
         if use_cot:
             torch.save(med.state_dict(), med_model_path)
