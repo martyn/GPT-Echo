@@ -25,13 +25,14 @@ Download this repo.
 1. Grab the pretrained model.(Not ready yet)
 2. run `python3 app.py -m '[foundation model]' -n '[pretrained_model]' -r [reservoir_size] -z [context_length]`
 
+
 ## Training
 
 ```
-python3 train-echo.py -m 'cerebras/Cerebras-GPT-111M' -n test -e 5 -r 1024 -z 128 -t [training_data_path.txt] -v [validation_data_path.txt] -lr 0.006
+python3 train-echo.py -m 'cerebras/Cerebras-GPT-111M' -n test -e 10 -r 1024 -z 128 -t emoji_train.txt -v emoji_test.txt -lr 0.006
 ```
 
-This will train the echo network in test.pth for 5 epochs with a 1024 reservoir size, context length of 128 training with cross entropy loss.
+This will train the echo network and save `emoji.pth` after training for 10 epochs with a 1024 reservoir size, context length of 128 training with cross entropy loss.
 
 ## Scaling
 

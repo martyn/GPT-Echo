@@ -19,9 +19,9 @@ gpt2.cuda()
 model.cuda()
 
 def process_input(user_input):
-    user_input = "\n> " + user_input + "\n"
+    user_input = "<|prompter|>" + user_input + "<|endoftext|><|assistant|>"
     print("Added: " + user_input)
-    num_tokens=32
+    num_tokens=128
     top_k=100
     top_p=0.9
     temperature=0.9

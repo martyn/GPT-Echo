@@ -34,29 +34,22 @@ parser.add_argument('-c', '--connectivity', required=False, default=0.2, type=fl
 parser.add_argument('-lr', '--learnrate', required=False, default=2e-4, type=float)
 parser.add_argument('-cot', '--usecot', action='store_true')
 parser.add_argument('-s', '--save', action='store_true')
-parser.add_argument('-a', '--attn', required=False, default=0, type=int)
-parser.add_argument('-ah', '--attnheads', required=False, default=4, type=int)
 parser.add_argument('-b', '--batchsize', required=False, default=32, type=int)
 parser.add_argument('-llama', '--llamapath', default="/ml/ais", type=str)
 parser.add_argument('-forwardforward', '--forwardforward', action='store_true')
+parser.add_argument('-llmcontext', '--llmcontext', default=None, type=str)
 args = parser.parse_args()
 
 model_name = args.modelname
 use_cot = args.usecot
 use_forward_forward = args.forwardforward
-use_cerebras = False
 use_llama = False
+use_cerebras = False
 model_path = f"{args.name}.pth"
 med_model_path = f"{args.name}_med.pth"
-#file_path="/ml/text/alpaca_data.txt"
-#validation_path="/ml/text/alpaca_data_test.txt"
-#file_path="/ml/text/curated.txt"
-#validation_path="/ml/text/curated_test.txt"
 neg_file_path=args.negfilepath
 file_path=args.trainfilepath
 validation_path=args.testfilepath
-#model_path = "adv.pth"  # Replace with your desired file path
-#med_model_path = "adv_med.pth"  # Replace with your desired file path
 reservoir_size = args.reservoir
 hidden_size=reservoir_size
 epochs = args.epochs
@@ -88,7 +81,7 @@ gpt2.cuda()
 
 if use_llama:
     gpt2_embedding_layer = gpt2.base_model.embed_tokens
-elif use_cerebras and hasattr(gpt2.base_model, 'wte'):
+elif hasattr(gpt2.base_model, 'wte'):
     use_cerebras = True
     gpt2_embedding_layer = gpt2.base_model.wte
 else:
@@ -528,15 +521,13 @@ def minimal_negative_filtering(probs, top_k, prob_threshold, entropy_threshold, 
     return filter_mask
 
 
-def train_model(model, gpt2, tokenizer, neg_data_loader, train_data_loader, val_data_loader, epochs, seq_length, lr=6e-3, weight_decay=1e-2, early_stop_patience=4, med = None, save_every_epoch=False):
+def train_model(model, gpt2, tokenizer, neg_data_loader, train_data_loader, val_data_loader, epochs, seq_length, lr=6e-3, weight_decay=1e-2, early_stop_patience=4, med = None, save_every_epoch=False, llm_pre_prompt=None):
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.readout.parameters(), lr=lr, betas=(0.9, 0.99))
-    #optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay, betas=(0.9,0.999))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay, betas=(0.9,0.999))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=0)
     if use_cot:
         med_optimizer = torch.optim.AdamW(med.parameters(), lr=lr, weight_decay=weight_decay, betas=(0.9,0.999))
         med_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(med_optimizer, T_max=epochs, eta_min=0)
-        #med_optimizer = torch.optim.Adam(med.readout.parameters(), lr=lr)
 
     best_val_loss = float('inf')
     patience_counter = 0
@@ -611,16 +602,15 @@ def train_model(model, gpt2, tokenizer, neg_data_loader, train_data_loader, val_
             else:
                 tqdm.write(f'Step [{batch_idx + 1}/{len(train_data_loader)}], Loss: {loss.item():.4f}', end='\r')
 
-            #if (batch_idx + 1) % 500 == 0:
-                #model.reset()
-                #print("Begin sample:")
-                #sample_model(model, prompt, tokenizer, seq_length,mediator=med,svd_bias=None)
-                #print("Saving")
-                #torch.save(model.state_dict(), model_path)
-                #if use_cot:
-                #    torch.save(med.state_dict(), med_model_path)
+            if save_every_epoch and (batch_idx + 1) % 500 == 0:
+                model.reset()
+                print("Begin sample:")
+                sample_model(model, prompt, tokenizer, seq_length,mediator=med,svd_bias=None)
+                print("Saving")
+                torch.save(model.state_dict(), model_path)
+                if use_cot:
+                    torch.save(med.state_dict(), med_model_path)
 
-        #else:
         scheduler.step()
         if use_cot:
             med_scheduler.step()
@@ -749,6 +739,11 @@ if __name__ == "__main__":
     test_dataset = LargeTextDataset(validation_path, tokenizer, seq_length)
     data_loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, drop_last=True, shuffle=True, pin_memory=True, prefetch_factor=4)
     test_data_loader = DataLoader(test_dataset, batch_size=batch_size, num_workers=0, drop_last=True, shuffle=True, pin_memory=True)
+    llm_context = args.llmcontext
+    if llm_context is not None:
+        llm_pre_prompt = args.llmcontext
+    else:
+        llm_pre_prompt = None
     if neg_file_path:
         neg_dataset = LargeTextDataset(neg_file_path, tokenizer, seq_length)
         neg_data_loader = DataLoader(neg_dataset, batch_size=batch_size, num_workers=num_workers, drop_last=True, shuffle=True, pin_memory=True, prefetch_factor=4)
@@ -768,7 +763,7 @@ if __name__ == "__main__":
     if not loaded or args.train:
         size = torch.cuda.device_count()
         print("Training")
-        train_model(model, gpt2, tokenizer, neg_data_loader, data_loader, test_data_loader, epochs, seq_length, med=med, save_every_epoch=args.save, lr=args.learnrate)
+        train_model(model, gpt2, tokenizer, neg_data_loader, data_loader, test_data_loader, epochs, seq_length, med=med, save_every_epoch=args.save, lr=args.learnrate, llm_pre_prompt=llm_pre_prompt)
         torch.save(model.state_dict(), model_path)
         if use_cot:
             torch.save(med.state_dict(), med_model_path)
