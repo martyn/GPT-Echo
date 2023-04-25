@@ -1,19 +1,24 @@
 # GPT-Echo
 
-GPT-Echo is an open source research which uses pretrained GPT models to generate embeddings which are fed into an echo state network (ESN).
+GPT-Echo is open source research which uses pretrained GPT models to generate embeddings that are then fed into an echo state network (ESN) for memory.
 
 The ESN acts as a contextualizer, preserving semantic information from the GPT embeddings to aid downstream tasks. (thanks GPT4)
 
-The only trainable layer is the readout layer.
+The only trainable layer is the readout layer which makes training costs potentially comparable to a fine-tune.
 
-It is then trained on target tasks. Currently only text generation is supported. A chatbot example is included.
+Currently only text generation is supported.
+
+## Chatbot
+
+[ Add screenshot ]
+
+The chatbot interface.
 
 ## Installation
 
 Download this repo.
 
 `pip3 install -r requirements.txt`
-
 
 ## Running the chatbot
 
@@ -44,7 +49,7 @@ Run it with the same arguments you'd use to train.
 
 These are experimental. They work but do not guarantee better results and can slow down training.
 
-1. `--usecot` - this trains 2 different ESN networks, a mediator and a generator. The mediator than then potentially be used to direct generator sampling.
+1. `--usecot` - this trains 2 different ESN networks, a mediator and a generator. The mediator than then potentially be used to direct generator sampling(needs more research).
 2. `--forwardforward` - uses Hinton's forward-forward training the readout layer. For negative samples it support either random uniform, a custom negative dataset, or sampling from the base model.
 
 
@@ -52,8 +57,18 @@ These are experimental. They work but do not guarantee better results and can sl
 
 | Dataset | Foundation Model | Download  | Reservoir size | Context Length | Epochs | Accuracy
 |:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| [https://huggingface.co/datasets/OpenAssistant/oasst1](OpenAssistant/oasst1) | cerebras/Cerebras-GPT-111M | ... | 512 |  128 | 5 |  ?
-| [https://huggingface.co/datasets/OpenAssistant/oasst1](OpenAssistant/oasst1) | OpenAssistant/stablelm-7b-sft-v7-epoch-3 | ... | 128 |  1024 |  0.1 |  ?
+| [https://huggingface.co/datasets/OpenAssistant/oasst1](OpenAssistant/oasst1) | cerebras/Cerebras-GPT-111M | ... | 768 | 128 | 5 |  ?
+| [https://huggingface.co/datasets/OpenAssistant/oasst1](OpenAssistant/oasst1) | OpenAssistant/stablelm-7b-sft-v7-epoch-3 | ... | 1024 |  128 |  0.1 |  ?
+
+
+## Notes and contributing
+
+This is an experimental and novel technique. There may be bugs. It may not perform as well as other methods. Further evaluation is required.
+
+## License
+
+MIT
+
 
 ## References
 
