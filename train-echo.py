@@ -184,43 +184,8 @@ class FilterModel(nn.Module):
         x = x.view(batch_size, seq_len)
         return x
 
-class PositionWiseFeedForward(nn.Module):
-    def __init__(self, reservoir_size, ff_hidden_size):
-        super(PositionWiseFeedForward, self).__init__()
-        self.fc1 = nn.Linear(reservoir_size, ff_hidden_size)
-        self.fc2 = nn.Linear(ff_hidden_size, reservoir_size)
-
-    def forward(self, x):
-        return self.fc2(F.relu(self.fc1(x)))
-
-class MultiHeadAttention(nn.Module):
-    def __init__(self, reservoir_size, num_heads):
-        super(MultiHeadAttention, self).__init__()
-        self.num_heads = num_heads
-        self.reservoir_size = reservoir_size
-        self.head_size = reservoir_size // num_heads
-        
-        self.attention_key = nn.Linear(reservoir_size, reservoir_size)
-        self.attention_query = nn.Linear(reservoir_size, reservoir_size)
-        self.attention_value = nn.Linear(reservoir_size, reservoir_size)
-        
-        self.sqrt_head_size = torch.sqrt(torch.tensor(self.head_size, dtype=torch.float32))
-
-    def forward(self, prev_state, r):
-        batch_size = prev_state.size(0)
-        
-        key = self.attention_key(r).view(batch_size, self.num_heads, self.head_size).transpose(1, 2)
-        query = self.attention_query(prev_state).view(batch_size, self.num_heads, self.head_size).transpose(1, 2)
-        value = self.attention_value(r).view(batch_size, self.num_heads, self.head_size).transpose(1, 2)
-        
-        attention_scores = torch.matmul(query, key.transpose(-2, -1)) / self.sqrt_head_size
-        attention_weights = F.softmax(attention_scores, dim=-1)
-        attention_output = torch.matmul(attention_weights, value).transpose(1, 2).contiguous().view(batch_size, self.reservoir_size)
-        
-        return attention_output
-
 class CustomReservoir(nn.Module):
-    def __init__(self, input_size, reservoir_size, connectivity=0.2, spectral_radius=0.9, leak_rate=0.8, num_heads=1, num_attention_layers=0):
+    def __init__(self, input_size, reservoir_size, connectivity=0.2, spectral_radius=0.9, leak_rate=0.8):
         super(CustomReservoir, self).__init__()
         self.reservoir_size = reservoir_size
         self.connectivity = connectivity
@@ -231,10 +196,6 @@ class CustomReservoir(nn.Module):
         nn.init.xavier_uniform_(self.win)
         ff_hidden_size = reservoir_size * 2
         self.wres = nn.Parameter(self.init_sparse_weights(reservoir_size, connectivity), requires_grad=False)
-        self.multi_head_attentions = nn.ModuleList([MultiHeadAttention(reservoir_size, num_heads) for _ in range(num_attention_layers)])
-        self.feed_forwards = nn.ModuleList([PositionWiseFeedForward(reservoir_size, ff_hidden_size) for _ in range(num_attention_layers)])
-
-        self.layer_norms = nn.ModuleList([nn.LayerNorm(reservoir_size) for _ in range(num_attention_layers)])
 
         self.init_weights()
 
@@ -245,12 +206,7 @@ class CustomReservoir(nn.Module):
         u = torch.matmul(x, self.win.t())
         r = torch.matmul(prev_state, self.wres)
 
-        attention_output = r
-        for multi_head_attention, layer_norm in zip(self.multi_head_attentions, self.layer_norms):
-            mha = multi_head_attention(prev_state, layer_norm(attention_output))
-            attention_output = attention_output + mha
-
-        next_state = (1 - self.leak_rate) * prev_state + self.leak_rate * self.activation(u + attention_output)
+        next_state = (1 - self.leak_rate) * prev_state + self.leak_rate * self.activation(u + r)
         return next_state
 
     def init_sparse_weights(self, size, connectivity):
@@ -266,84 +222,14 @@ class CustomReservoir(nn.Module):
             max_eigenvalue = torch.max(torch.abs(eigenvalues))
             self.wres._values().mul_(self.spectral_radius / max_eigenvalue)
 
-class ReadAttention(nn.Module):
-    def __init__(self, reservoir_size, memory_size, memory_vector_length, num_read_heads):
-        super(ReadAttention, self).__init__()
-
-        self.memory_size = memory_size
-        self.num_read_heads = num_read_heads
-
-        self.key_layer = nn.Linear(reservoir_size, memory_vector_length * num_read_heads)
-        self.beta_layer = nn.Linear(reservoir_size, num_read_heads)
-
-        # Initialize the layers with xavier_uniform_ for better convergence
-        nn.init.xavier_uniform_(self.key_layer.weight)
-        nn.init.xavier_uniform_(self.beta_layer.weight)
-
-    def forward(self, reservoir_state, memory):
-        batch_size = reservoir_state.size(0)
-
-        # Compute keys and betas for each read head
-        keys = self.key_layer(reservoir_state).view(batch_size, self.num_read_heads, -1)
-        betas = torch.relu(self.beta_layer(reservoir_state))
-
-        return self.calculate_attention_weights(keys, betas, memory)
-
-    def calculate_attention_weights(self, keys, betas, memory):
-        mem = memory.transpose(1, 2).unsqueeze(0)
-        dot_products = torch.matmul(keys.unsqueeze(2), mem).squeeze(2)
-
-        dot_products = dot_products / torch.sqrt(torch.sum(keys ** 2, dim=-1, keepdim=True))
-
-        attention_weights = torch.softmax(betas.unsqueeze(1) * dot_products, dim=-1)
-        return attention_weights
-
-class WriteAttention(nn.Module):
-    def __init__(self, reservoir_size, memory_size, memory_vector_length):
-        super(WriteAttention, self).__init__()
-
-        self.reservoir_size = reservoir_size
-        self.memory_size = memory_size
-        self.memory_vector_length = memory_vector_length
-
-        # Define the linear layers for key, erase, and add vectors
-        self.key_layer = nn.Linear(reservoir_size, memory_vector_length)
-        self.erase_layer = nn.Linear(reservoir_size, memory_vector_length)
-        self.add_layer = nn.Linear(reservoir_size, memory_vector_length)
-
-        # Define the linear layer for the interpolation gate
-        self.interpolation_gate_layer = nn.Linear(reservoir_size, 1)
-
-    def forward(self, reservoir_state, memory):
-        # Compute the key vector
-        key = self.key_layer(reservoir_state)
-
-        # Compute the erase and add vectors
-        erase_vector = F.sigmoid(self.erase_layer(reservoir_state))
-        add_vector = F.tanh(self.add_layer(reservoir_state))
-
-        # Compute the interpolation gate
-        interpolation_gate = F.sigmoid(self.interpolation_gate_layer(reservoir_state))
-
-        # Calculate the content-based addressing weights
-        memory_norm = F.normalize(memory, dim=-1)
-        key_norm = F.normalize(key, dim=-1)
-        content_weights = torch.matmul(memory_norm, key_norm.unsqueeze(-1)).squeeze(-1)
-
-        # Compute the write weights using the interpolation gate
-        write_weights = interpolation_gate * content_weights
-
-        return write_weights, erase_vector, add_vector
-
-
 class ReservoirComputing(nn.Module):
-    def __init__(self, input_size, reservoir_size, output_size, num_layers=1, connectivity=0.3, spectral_radius=0.94, leak_rate=0.85, readout_layers=0, llama_scale=(1.65, 0.155), num_heads=1, num_attention_layers=0):
+    def __init__(self, input_size, reservoir_size, output_size, num_layers=1, connectivity=0.3, spectral_radius=0.94, leak_rate=0.85, readout_layers=0, llama_scale=(1.65, 0.155)):
         super(ReservoirComputing, self).__init__()
 
         self.num_layers = num_layers
         self.llama_scale = llama_scale
         self.reservoir_layers = nn.ModuleList([
-            CustomReservoir(input_size if i == 0 else reservoir_size, reservoir_size, connectivity, spectral_radius, leak_rate, num_heads=num_heads, num_attention_layers=num_attention_layers)
+            CustomReservoir(input_size if i == 0 else reservoir_size, reservoir_size, connectivity, spectral_radius, leak_rate)
             for i in range(num_layers)
         ])
 
@@ -842,9 +728,8 @@ def extract_features(x, model):
     return last_hidden_state.to(torch.float32), features.logits
 
 def load_models(args):
-
-    model = ReservoirComputing(input_size, reservoir_size, vocab_size, num_attention_layers=args.attn, num_layers=args.layers, spectral_radius=args.spectralradius, leak_rate=args.leakrate, connectivity=args.connectivity, num_heads=args.attnheads).cuda()
-    med = ReservoirComputing(input_size, reservoir_size, vocab_size, num_attention_layers=args.attn, num_layers=args.layers, spectral_radius=args.spectralradius, leak_rate=args.leakrate, connectivity=args.connectivity, num_heads=args.attnheads).cuda()
+    model = ReservoirComputing(input_size, reservoir_size, vocab_size, num_layers=args.layers, spectral_radius=args.spectralradius, leak_rate=args.leakrate, connectivity=args.connectivity).cuda()
+    med = ReservoirComputing(input_size, reservoir_size, vocab_size, num_layers=args.layers, spectral_radius=args.spectralradius, leak_rate=args.leakrate, connectivity=args.connectivity).cuda()
     num_filters = 128
     loaded = False
     if os.path.exists(model_path):
